@@ -32,15 +32,17 @@ module ServerBackup
       require 'chef/knife/core/object_loader'
       require 'chef/cookbook_uploader'
       require 'chef/api_client'
+      require 'securerandom'
+      require 'json'
     end
 
     banner "knife backup restore [COMPONENT [COMPONENT ...]] [-D DIR] (options)"
 
     option :backup_dir,
-    :short => "-D DIR",
-    :long => "--backup-directory DIR",
-    :description => "Restore backup data from DIR.",
-    :default => Chef::Config[:knife][:chef_server_backup_dir] ? Chef::Config[:knife][:chef_server_backup_dir] : File.join(".chef", "chef_server_backup")
+      :short => "-D DIR",
+      :long => "--backup-directory DIR",
+      :description => "Restore backup data from DIR.",
+      :default => Chef::Config[:knife][:chef_server_backup_dir] ? Chef::Config[:knife][:chef_server_backup_dir] : File.join(".chef", "chef_server_backup")
 
     def run
       ui.warn "This will overwrite existing data!"
@@ -52,7 +54,7 @@ module ServerBackup
     end
 
     private
-    COMPONENTS = %w(clients nodes roles data_bags environments cookbooks)
+    COMPONENTS = %w(clients users nodes roles data_bags environments cookbooks)
 
     def validate!
       bad_names = name_args - COMPONENTS
@@ -121,10 +123,36 @@ module ServerBackup
           rest.post_rest("clients", {
             :name => client['name'],
             :public_key => client['public_key'],
-            :admin => client['admin']
+            :admin => client['admin'],
+            :validator => client['validator']
           })
         rescue Net::HTTPServerException => e
           handle_error 'client', client['name'], e
+        end
+      end
+    end
+
+    def users
+      JSON.create_id = "no_thanks"
+      ui.info "=== Restoring users ==="
+      users = Dir.glob(File.join(config[:backup_dir], "users", "*.json"))
+      if !users.empty? and Chef::VERSION !~ /^1[1-9]\./
+        ui.warn "users restore only supported on chef >= 11"
+        return
+      end
+      users.each do |file|
+        user = JSON.parse(IO.read(file))
+        password = SecureRandom.hex[0..7]
+        begin
+          rest.post_rest("users", {
+            :name => user['name'],
+            :public_key => user['public_key'],
+            :admin => user['admin'],
+            :password => password
+          })
+          ui.info "Set password for #{user['name']} to #{password}, please update"
+        rescue Net::HTTPServerException => e
+          handle_error 'user', user['name'], e
         end
       end
     end
@@ -133,20 +161,21 @@ module ServerBackup
       ui.info "=== Restoring cookbooks ==="
       cookbooks = Dir.glob(File.join(config[:backup_dir], "cookbooks", '*'))
       cookbooks.each do |cb|
-        full_cb = cb.split("/").last
-        cookbook = full_cb.reverse.split('-',2).last.reverse
-        full_path = File.join(config[:backup_dir], "cookbooks", cookbook)
+        full_cb = File.expand_path(cb)
+        cb_name = File.basename(cb)
+        cookbook = cb_name.reverse.split('-',2).last.reverse
+        full_path = File.join(File.dirname(full_cb), cookbook)
 
         begin
           File.symlink(full_cb, full_path)
           cbu = Chef::Knife::CookbookUpload.new
           Chef::Knife::CookbookUpload.load_deps
           cbu.name_args = [ cookbook ]
-          cbu.config[:cookbook_path] = File.join(config[:backup_dir], "cookbooks")
+          cbu.config[:cookbook_path] = File.dirname(full_path)
           ui.info "Restoring cookbook #{cbu.name_args}"
           cbu.run
         rescue Net::HTTPServerException => e
-          handle_error 'cookbook', full_cb, e
+          handle_error 'cookbook', cb_name, e
         ensure
           File.unlink(full_path)
         end

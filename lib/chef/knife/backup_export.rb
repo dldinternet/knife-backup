@@ -19,6 +19,9 @@
 
 require 'chef/node'
 require 'chef/api_client'
+if Chef::VERSION =~ /^1[1-9]\./
+  require 'chef/user'
+end
 require 'chef/knife/cookbook_download'
 
 module ServerBackup
@@ -32,16 +35,16 @@ module ServerBackup
     banner "knife backup export [COMPONENT [COMPONENT ...]] [-D DIR] (options)"
 
     option :backup_dir,
-    :short => "-D DIR",
-    :long => "--backup-directory DIR",
-    :description => "Store backup data in DIR.  DIR will be created if it does not already exist.",
-    :default => Chef::Config[:knife][:chef_server_backup_dir] ? Chef::Config[:knife][:chef_server_backup_dir] : File.join(".chef", "chef_server_backup")
+      :short => "-D DIR",
+      :long => "--backup-directory DIR",
+      :description => "Store backup data in DIR.  DIR will be created if it does not already exist.",
+      :default => Chef::Config[:knife][:chef_server_backup_dir] ? Chef::Config[:knife][:chef_server_backup_dir] : File.join(".chef", "chef_server_backup")
 
     option :latest,
-     :short => "-N",
-     :long => "--latest",
-     :description => "The version of the cookbook to download",
-     :boolean => true
+      :short => "-N",
+      :long => "--latest",
+      :description => "The version of the cookbook to download",
+      :boolean => true
 
     def run
       validate!
@@ -50,7 +53,8 @@ module ServerBackup
     end
 
     private
-    COMPONENTS = %w(clients nodes roles data_bags environments cookbooks)
+    COMPONENTS = %w(clients users nodes roles data_bags environments cookbooks)
+    LOAD_TRIES = 5
 
     def validate!
       bad_names = name_args - COMPONENTS
@@ -66,6 +70,14 @@ module ServerBackup
 
     def clients
       backup_standard("clients", Chef::ApiClient)
+    end
+
+    def users 
+      if Chef::VERSION =~ /^1[1-9]\./
+        backup_standard("users", Chef::User)
+      else
+        ui.warn "users export only supported on chef >= 11"
+      end
     end
 
     def roles
@@ -99,11 +111,24 @@ module ServerBackup
       klass.list.each do |component_name, url|
         next if component == "environments" && component_name == "_default"
         ui.msg "Backing up #{component} #{component_name}"
-        component_obj = klass.load(component_name)
+        component_obj = load_object(klass, component_name)
+        unless component_obj
+          ui.error "Could not load #{klass} #{component_name}."
+          next
+        end
         File.open(File.join(dir, "#{component_name}.json"), "w") do |component_file|
-          #component_file.print(component_obj.to_json)
           component_file.print(JSON.pretty_generate(component_obj))
         end
+      end
+    end
+
+    def load_object(klass, name, try = 1)
+      klass.load(name)
+    rescue NoMethodError
+      ui.warn "Problem loading #{klass} #{name}. Try #{try}/#{LOAD_TRIES}"
+      if try < LOAD_TRIES
+        try += 1
+        load_object(klass, name, try)
       end
     end
 
